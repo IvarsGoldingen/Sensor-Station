@@ -5,16 +5,10 @@
 #include <CO2_sens.h>
 #include <FirebaseESP32.h>
 #include <EEPROM.h>
-#include <Adafruit_BME280.h>
+#include <Adafruit_BMP280.h>
 //#include <WiFi.h>
-
-
-
-
 //debug serial print 0 = no 1 yes
 #define DEBUG 1
-
-
 
 /***********EEPROM defines*****************/
 //EEPROM size
@@ -45,13 +39,12 @@
 #define READ_DHT_MS READ_DHT_S*1000
 
 /***********SGP defines*****************/
-#define I2C_SDA 26
-#define I2C_SCL 25
+
 //How often to read from SGP sensor
 #define READ_SGP_S 1
 #define READ_SGP_MS READ_SGP_S*1000
 //How often to write humidity to SGP sensor
-#define WRITE_HUM_SGP_S 60
+#define WRITE_HUM_SGP_S 3600
 #define WRITE_HUM_MS WRITE_HUM_SGP_S*1000
 #define DEFAULT_CO2_BASE 35694
 #define DEFAULT_TVOC_BASE 37064
@@ -67,7 +60,7 @@ struct tm timeinfo;
 /***********wifi and Firebase values*****************/
 const char* ssid = "HUAWEI-B315-3EDC";
 const char* password =  "A3E10YT5MA2";
-const unsigned long LOG_FB_INTERVAL_S = 600;
+const unsigned long LOG_FB_INTERVAL_S = 300;
 const unsigned long LOG_FB_INTERVAL_MS = LOG_FB_INTERVAL_S * 1000;
 FirebaseData firebaseData;
 FirebaseJson json;
@@ -78,7 +71,9 @@ unsigned long lastFbLog = 0;
 unsigned long logNr = 0;
 
 
-//I2C object
+//I2C
+#define I2C_SDA 26
+#define I2C_SCL 25
 TwoWire I2C = TwoWire(0);
 
 /***********LOG values*****************/
@@ -112,6 +107,11 @@ bool tempHumValid = false;
 //last time DHT was read
 unsigned long lastDHTReadMs = 0;
 
+/***********BMP280 values - pressure sensor*****************/
+Adafruit_BMP280 bmp;
+Adafruit_Sensor *bmp_temp = bmp.getTemperatureSensor();
+Adafruit_Sensor *bmp_pressure = bmp.getPressureSensor();
+
 bool test = true;
 
 void logFb();
@@ -144,12 +144,41 @@ void setup() {
   initCO2baseValues();
   //Humidity and temp sensor setup
   dht.begin();
-
   logFb();
-  while(1);
+  
+
+  Serial.println(F("BMP280 Sensor event test"));
+    if (!bmp.begin()) {
+    Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
+    while (1) delay(10);
+  }
+
+  /* Default settings from datasheet. */
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+
+  bmp_temp->printSensorDetails();
 }
 
 void loop() {
+  sensors_event_t temp_event, pressure_event;
+  bmp_temp->getEvent(&temp_event);
+  bmp_pressure->getEvent(&pressure_event);
+  
+  Serial.print(F("Temperature = "));
+  Serial.print(temp_event.temperature);
+  Serial.println(" *C");
+
+  Serial.print(F("Pressure = "));
+  Serial.print(pressure_event.pressure);
+  Serial.println(" hPa");
+
+  Serial.println();
+  delay(2000);
+  /*
   measureAirQuality();
   measureHumTemp();
   setHumidityInCO2Sens();
@@ -157,6 +186,7 @@ void loop() {
   storeBaseValues();
   readSerial();
   logFb();
+  */
 }
 
 //delete base values from flash
@@ -214,6 +244,7 @@ void initCO2baseValues(){
     debugPrintln("Skipping initial values");
   } else {
     //use hard coded base values
+
     CO2Base = DEFAULT_CO2_BASE;
     TVOCBase = DEFAULT_TVOC_BASE;
     debugPrintln("No base value stored in EEPROM");
@@ -383,9 +414,11 @@ void logFb() {
       json2.set("/TVOC", arrCO2_TVOC[1]);
       json2.set("/CO2", arrCO2_TVOC[0]);
     }
-    json2.set("Time2", "timestamp");
-    Firebase.updateNode(firebaseData, "/Log2/" + (String)logNr,json2);
-    //Firebase.setTimestamp(firebaseData, "/Log/" + String(logNr)+ "/Time");
+    //json2.set("Time2", "timestamp");
+    //Firebase.pushTimestamp(firebaseData,"/Log3/");
+    
+    Firebase.updateNode(firebaseData, "/Log/" + (String)logNr,json2);
+    Firebase.setTimestamp(firebaseData, "/Log/" + String(logNr)+ "/Time");
     logNr++;
   }
   
