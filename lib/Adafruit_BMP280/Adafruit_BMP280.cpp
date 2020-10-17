@@ -97,7 +97,8 @@ bool Adafruit_BMP280::begin(uint8_t addr, uint8_t chipid) {
   }
 
   if (read8(BMP280_REGISTER_CHIPID) != chipid)
-    //return false;
+  //If this is uncommented fake aliexpress chips don't work
+  //return false;
 
   readCoefficients();
   // write8(BMP280_REGISTER_CONTROL, 0x3F); /* needed? */

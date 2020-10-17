@@ -27,7 +27,7 @@
 #define MAX_WIFI_CONNECT_TIME_MS MAX_WIFI_CONNECT_TIME_S*1000
 #define WRITE_TO_FB_MS 1000
 
-/***********DHT defines*****************/
+/***********DHT defines - temp and humidity*****************/
 // Digital pin connected to the DHT sensor
 #define DHTPIN 33     
 // Uncomment whatever type you're using!
@@ -38,8 +38,7 @@
 #define READ_DHT_S 10
 #define READ_DHT_MS READ_DHT_S*1000
 
-/***********SGP defines*****************/
-
+/***********SGP defines - CO2 and TVOC*****************/
 //How often to read from SGP sensor
 #define READ_SGP_S 1
 #define READ_SGP_MS READ_SGP_S*1000
@@ -50,6 +49,10 @@
 #define DEFAULT_TVOC_BASE 37064
 #define STORE_BASE_VALUES_M 60
 #define STORE_BASE_VALUES_MS STORE_BASE_VALUES_M*60*1000
+
+/***********BMP constants - pressure and temp*****************/
+const long READ_F_BMP_P_T_S = 10;
+const long READ_F_BMP_P_T_MS = READ_F_BMP_P_T_S * 1000;
 
 /***********NTP time*****************/
 const char* NTP_SERVER = "pool.ntp.org";
@@ -69,7 +72,6 @@ bool wifiConnected = false;
 unsigned long lastWriteToFB = 0;
 unsigned long lastFbLog = 0;
 unsigned long logNr = 0;
-
 
 //I2C
 #define I2C_SDA 26
@@ -108,12 +110,17 @@ bool tempHumValid = false;
 unsigned long lastDHTReadMs = 0;
 
 /***********BMP280 values - pressure sensor*****************/
-Adafruit_BMP280 bmp;
+Adafruit_BMP280 bmp = Adafruit_BMP280(&I2C);
 Adafruit_Sensor *bmp_temp = bmp.getTemperatureSensor();
 Adafruit_Sensor *bmp_pressure = bmp.getPressureSensor();
+unsigned long lastPressureRead = 0;
+double temperature2 = -100.0;
+double pressure = -100.0;
+bool bmpReadValid = false;
 
 bool test = true;
 
+void measurePressureTemp();
 void logFb();
 void clearBaseValues();
 void storeBaseValues();
@@ -144,49 +151,26 @@ void setup() {
   initCO2baseValues();
   //Humidity and temp sensor setup
   dht.begin();
-  logFb();
-  
-
-  Serial.println(F("BMP280 Sensor event test"));
-    if (!bmp.begin()) {
-    Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
-    while (1) delay(10);
-  }
-
+  //Init pressure and temperature sensor
   /* Default settings from datasheet. */
+  bmp.begin();
   bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
                   Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
                   Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
                   Adafruit_BMP280::FILTER_X16,      /* Filtering. */
                   Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
-
   bmp_temp->printSensorDetails();
 }
 
 void loop() {
-  sensors_event_t temp_event, pressure_event;
-  bmp_temp->getEvent(&temp_event);
-  bmp_pressure->getEvent(&pressure_event);
-  
-  Serial.print(F("Temperature = "));
-  Serial.print(temp_event.temperature);
-  Serial.println(" *C");
-
-  Serial.print(F("Pressure = "));
-  Serial.print(pressure_event.pressure);
-  Serial.println(" hPa");
-
-  Serial.println();
-  delay(2000);
-  /*
   measureAirQuality();
   measureHumTemp();
   setHumidityInCO2Sens();
   updateFbRealTimeData();
   storeBaseValues();
   readSerial();
+  measurePressureTemp();
   logFb();
-  */
 }
 
 //delete base values from flash
@@ -205,11 +189,12 @@ void readSerial(){
     switch (cmd)
     {
     case 'd':
-      debugPrintln("Clearing flash");
+      Serial.println("Clearing flash");
+      Serial.println("Recalibration will be executed");
       clearBaseValues();
       break;
     case 'r':
-      debugPrintln("Recalibration after next restart");
+      debugPrintln("Using stored values");
       EEPROM.write(EEPADD_BASE_EXISTS, 2);
       EEPROM.commit();
       break;
@@ -227,7 +212,7 @@ void initCO2baseValues(){
   uint16_t TVOCBase = 0;
   //check if there is a value stored in EEPROM
   byte calibFunc = EEPROM.read(EEPADD_BASE_EXISTS);
-  if (calibFunc == 1){
+  if (calibFunc == 2){
     debugPrintln("Reading base values stored in EEPROM");
     byte CO2byte1 = EEPROM.read(EEPADD_CO2_1);
     byte CO2byte2 = EEPROM.read(EEPADD_CO2_2);
@@ -240,11 +225,10 @@ void initCO2baseValues(){
     debugPrint("TVOC Base set:");
     debugPrintln((String)TVOCBase);
     setbaseValues = true;
-  } else if(calibFunc == 2){
-    debugPrintln("Skipping initial values");
   } else {
+    debugPrintln("Skipping initial values");
+    /*
     //use hard coded base values
-
     CO2Base = DEFAULT_CO2_BASE;
     TVOCBase = DEFAULT_TVOC_BASE;
     debugPrintln("No base value stored in EEPROM");
@@ -253,6 +237,7 @@ void initCO2baseValues(){
     debugPrint("TVOC Base set:");
     debugPrintln((String)DEFAULT_TVOC_BASE);
     setbaseValues = true;
+    */
   }
   if (setbaseValues){
     if (CO2s.setBaseLine(CO2Base, TVOCBase)){
@@ -276,7 +261,7 @@ void storeBaseValues(){
     byte CO2byte2 = bLine[0];
     byte TVOCbyte1 = bLine[1] >> 8;
     byte TVOCbyte2 = bLine[1];
-    EEPROM.write(EEPADD_BASE_EXISTS, 1);
+    EEPROM.write(EEPADD_BASE_EXISTS, 2);
     EEPROM.write(EEPADD_CO2_1, CO2byte1);
     EEPROM.write(EEPADD_CO2_2, CO2byte2);
     EEPROM.write(EEPADD_TVOC_1, TVOCbyte1);
@@ -332,6 +317,30 @@ void measureAirQuality(){
     } else {
       lastSGPReadValid = false;
       Serial.println("SGP measurement failed");
+    }
+  }
+}
+
+//Read from BMP sensor
+void measurePressureTemp(){
+  if (timePassed(&lastPressureRead, READ_F_BMP_P_T_MS)){
+    sensors_event_t temp_event, pressure_event;
+    bool tempReadSuccessfull = bmp_temp->getEvent(&temp_event);
+    bool pressureReadSuccessfull = bmp_pressure->getEvent(&pressure_event);
+    if (tempReadSuccessfull && pressureReadSuccessfull){
+      bmpReadValid = true;
+      Serial.print(F("T = "));
+      Serial.print(temp_event.temperature);
+      Serial.println(" C");
+
+      Serial.print(F("P = "));
+      Serial.print(pressure_event.pressure);
+      Serial.println(" hPa");
+      temperature2 = temp_event.temperature;
+      pressure = pressure_event.pressure;
+    } else {
+      bmpReadValid = false;
+      Serial.println("BMP measurement failed");
     }
   }
 }
@@ -414,14 +423,14 @@ void logFb() {
       json2.set("/TVOC", arrCO2_TVOC[1]);
       json2.set("/CO2", arrCO2_TVOC[0]);
     }
-    //json2.set("Time2", "timestamp");
-    //Firebase.pushTimestamp(firebaseData,"/Log3/");
-    
+    if (bmpReadValid){
+      json2.set("/pressure", pressure);
+      json2.set("/temperature2", temperature2);
+    }
     Firebase.updateNode(firebaseData, "/Log/" + (String)logNr,json2);
     Firebase.setTimestamp(firebaseData, "/Log/" + String(logNr)+ "/Time");
     logNr++;
   }
-  
 }
 
 //Update real time data in FB
@@ -437,6 +446,10 @@ void updateFbRealTimeData(){
     if (lastSGPReadValid){
       json.set("/TVOC", arrCO2_TVOC[1]);
       json.set("/CO2", arrCO2_TVOC[0]);
+    }
+    if (bmpReadValid){
+      json.set("/temperature2", temperature2);
+      json.set("/pressure", pressure);
     }
     Firebase.updateNode(firebaseData,"/SensorStation",json);    
   }
