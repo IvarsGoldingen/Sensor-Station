@@ -31,7 +31,7 @@
 // Digital pin connected to the DHT sensor
 #define DHTPIN 33     
 // Uncomment whatever type you're using!
-#define DHTTYPE DHT11   // DHT 11
+#define DHTTYPE DHT22   // DHT 11
 //#define DHTTYPE DHT22   // DHT 22  (AM2302), AM2321
 //#define DHTTYPE DHT21   // DHT 21 (AM2301)
 //How often to read from DHT sensor
@@ -47,6 +47,8 @@
 #define WRITE_HUM_MS WRITE_HUM_SGP_S*1000
 #define DEFAULT_CO2_BASE 35694
 #define DEFAULT_TVOC_BASE 37064
+//NUMBER OF TIMES BASE VALUE CALL MAST BE CALLED FOR THE FIRST STORE TO ACTUALLY HAPPEN
+#define STORE_BASE_VALUES_START 72
 #define STORE_BASE_VALUES_M 60
 #define STORE_BASE_VALUES_MS STORE_BASE_VALUES_M*60*1000
 
@@ -96,6 +98,8 @@ unsigned long lastSGPhumSet = 0;
 bool lastSGPReadValid = false;
 //last time base values were read
 unsigned long lastSGPBaseRead = 0;
+//Counter that delays the base value store. Needed according to the datasheet,
+unsigned int startBaseValueStoreCntr = 0;
 
 
 /***********DHT values*****************/
@@ -252,22 +256,28 @@ void initCO2baseValues(){
 //recommended to do once an hour
 void storeBaseValues(){
   if (timePassed(&lastSGPBaseRead, STORE_BASE_VALUES_MS)){
-    debugPrintln("Reading base values");
-    uint16_t  bLine[2];
-    CO2s.getBaseline(bLine);
-    debugPrint("eCO2 base:"); debugPrintln((String)bLine[0]);
-    debugPrint("TVOC base:"); debugPrintln((String)bLine[1]);
-    byte CO2byte1 = bLine[0] >> 8;
-    byte CO2byte2 = bLine[0];
-    byte TVOCbyte1 = bLine[1] >> 8;
-    byte TVOCbyte2 = bLine[1];
-    EEPROM.write(EEPADD_BASE_EXISTS, 2);
-    EEPROM.write(EEPADD_CO2_1, CO2byte1);
-    EEPROM.write(EEPADD_CO2_2, CO2byte2);
-    EEPROM.write(EEPADD_TVOC_1, TVOCbyte1);
-    EEPROM.write(EEPADD_TVOC_2, TVOCbyte2);
-    EEPROM.commit();
-    debugPrintln("Base values saved");
+    startBaseValueStoreCntr++;
+    if (startBaseValueStoreCntr > STORE_BASE_VALUES_START){
+      //delay the first read as it is recommended by the DS
+      startBaseValueStoreCntr = STORE_BASE_VALUES_START;
+      debugPrintln("Reading base values");
+      uint16_t  bLine[2];
+      CO2s.getBaseline(bLine);
+      debugPrint("eCO2 base:"); debugPrintln((String)bLine[0]);
+      debugPrint("TVOC base:"); debugPrintln((String)bLine[1]);
+      byte CO2byte1 = bLine[0] >> 8;
+      byte CO2byte2 = bLine[0];
+      byte TVOCbyte1 = bLine[1] >> 8;
+      byte TVOCbyte2 = bLine[1];
+      EEPROM.write(EEPADD_BASE_EXISTS, 2);
+      EEPROM.write(EEPADD_CO2_1, CO2byte1);
+      EEPROM.write(EEPADD_CO2_2, CO2byte2);
+      EEPROM.write(EEPADD_TVOC_1, TVOCbyte1);
+      EEPROM.write(EEPADD_TVOC_2, TVOCbyte2);
+      EEPROM.commit();
+      debugPrintln("Base values saved");
+    }
+    
   }
 }
 
