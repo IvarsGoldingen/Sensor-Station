@@ -6,6 +6,7 @@
 #include <FirebaseESP32.h>
 #include <EEPROM.h>
 #include <Adafruit_BMP280.h>
+#include <LiquidCrystal.h>
 //#include <WiFi.h>
 //debug serial print 0 = no 1 yes
 #define DEBUG 1
@@ -122,8 +123,15 @@ double temperature2 = -100.0;
 double pressure = -100.0;
 bool bmpReadValid = false;
 
+/***********Display values*****************/
+const int RS = 15, EN = 2, D4 = 0, D5 = 4, D6 = 16, D7 = 17;
+LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
+unsigned long lastLCDupdate = 0;
+unsigned const long LCD_UPDATE_FRQ_MS = 1000;
+
 bool test = true;
 
+void updateLCD();
 void measurePressureTemp();
 void logFb();
 void clearBaseValues();
@@ -142,6 +150,9 @@ uint32_t getAbsoluteHumidity(double temperature, double humidity);
 bool timePassed(unsigned long* prevTime, int intervalMs);
 
 void setup() {
+  //Initiate LCD screen
+  lcd.print("Init WiFi");
+  lcd.begin(16 ,2);
   Serial.begin(115200);
   EEPROM.begin(10);
   connectWifi();
@@ -175,6 +186,67 @@ void loop() {
   readSerial();
   measurePressureTemp();
   logFb();
+  updateLCD();
+}
+
+void updateLCD (){
+  /*if (tempHumValid){
+      json2.set("/temperature", temperature);
+      json2.set("/humidity", humidity);
+    } else {
+      json2.set("/temperature", -1);
+      json2.set("/humidity", -1);
+    }
+    if (lastSGPReadValid){
+      json2.set("/TVOC", arrCO2_TVOC[1]);
+      json2.set("/CO2", arrCO2_TVOC[0]);
+    }
+    if (bmpReadValid){
+      json2.set("/pressure", pressure);
+      json2.set("/temperature2", temperature2);
+    }
+    Firebase.updateNode(firebaseData, "/Log/" + (String)logNr,json2);
+    Firebase.setTimestamp(firebaseData, "/Log/" + String(logNr)+ "/Time");*/
+  byte screenNumber = 1;
+  if (timePassed(&lastLCDupdate, LCD_UPDATE_FRQ_MS)){
+    switch (screenNumber)
+    {
+    case 1:
+      lcd.clear();
+      lcd.print("CO2:");
+      lcd.print(arrCO2_TVOC[0]);
+      lcd.setCursor(8, 0);
+      lcd.print("t:");
+      lcd.print(temperature);
+      lcd.setCursor(0, 1);
+      lcd.print("TV:");
+      lcd.print(arrCO2_TVOC[1]);
+      lcd.setCursor(8, 1);
+      lcd.print("RH:");
+      lcd.print(humidity);
+      break;
+    case 2:
+      lcd.clear();
+      lcd.print("P:");
+      lcd.print(pressure);
+      lcd.setCursor(0, 1);
+      lcd.print("T2:");
+      lcd.print(temperature2);
+      break;
+    case 3:
+      lcd.clear();
+      if (WiFi.status() == WL_CONNECTED){
+        lcd.print("WiFi OK");
+        lcd.setCursor(0, 1);
+        lcd.print(WiFi.localIP());
+      } else {
+        lcd.print("WiFi FAULT!");
+      }
+      break;
+    default:
+      break;
+    }
+  }
 }
 
 //delete base values from flash
@@ -384,19 +456,25 @@ void connectWifi(){
   Serial.print("Connecting to ");
   Serial.println(ssid);
   WiFi.begin(ssid, password);
+  lcd.setCursor(0, 1);
   while (!connectTimeOut && !wifiConnected){
     if ((millis() - writeCharTime) > 25){
       //connecting indicator
       Serial.print(".");
+      lcd.print(".");
       writeCharTime = millis();
     }
     if (WiFi.status() == WL_CONNECTED){
       //Connection successful
       wifiConnected = true;
+      lcd.setCursor(0, 1);
+      lcd.print(WiFi.localIP());
       Serial.println("");
       Serial.println("WiFi connected");
       Serial.println("IP address: ");
-      Serial.println(WiFi.localIP()); 
+      Serial.println(WiFi.localIP());
+      Serial.println("MAC address: "); 
+      Serial.println(WiFi.macAddress()); 
     }
     if (millis() - connectWifiStartTime > MAX_WIFI_CONNECT_TIME_MS){
       //timed out of wifi connection
