@@ -7,7 +7,7 @@
 #include <EEPROM.h>
 #include <Adafruit_BMP280.h>
 #include <LiquidCrystal.h>
-//#include <WiFi.h>
+#include <ButtonIB.h>
 //debug serial print 0 = no 1 yes
 #define DEBUG 1
 
@@ -125,12 +125,17 @@ bool bmpReadValid = false;
 
 /***********Display values*****************/
 const int RS = 15, EN = 2, D4 = 0, D5 = 4, D6 = 16, D7 = 17;
+const byte MAX_SCREEN_NUMBER = 3;
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 unsigned long lastLCDupdate = 0;
 unsigned const long LCD_UPDATE_FRQ_MS = 1000;
+byte screenNumber = 1;
+
+/***********Button values*****************/
+const byte BUTTON_PIN = 5;
 
 bool test = true;
-
+void buttonPress(byte);
 void updateLCD();
 void measurePressureTemp();
 void logFb();
@@ -148,6 +153,8 @@ void measureHumTemp();
 void readSerial();
 uint32_t getAbsoluteHumidity(double temperature, double humidity);
 bool timePassed(unsigned long* prevTime, int intervalMs);
+
+ButtonIB btn(BUTTON_PIN, *buttonPress);
 
 void setup() {
   //Initiate LCD screen
@@ -187,31 +194,30 @@ void loop() {
   measurePressureTemp();
   logFb();
   updateLCD();
+  btn.loop();
 }
 
+void buttonPress(byte pressType){
+  debugPrint("BTN ");
+  if (pressType == btn.SHORT_PRESS){
+    debugPrint("SHORT");
+    screenNumber++;
+    if (screenNumber > MAX_SCREEN_NUMBER){
+      screenNumber = 1;
+    }
+    updateLCD();
+  } else if (pressType == btn.LONG_PRESS) {
+    debugPrint("LONG");
+  }
+}
+
+//Show different readings on the screen
 void updateLCD (){
-  /*if (tempHumValid){
-      json2.set("/temperature", temperature);
-      json2.set("/humidity", humidity);
-    } else {
-      json2.set("/temperature", -1);
-      json2.set("/humidity", -1);
-    }
-    if (lastSGPReadValid){
-      json2.set("/TVOC", arrCO2_TVOC[1]);
-      json2.set("/CO2", arrCO2_TVOC[0]);
-    }
-    if (bmpReadValid){
-      json2.set("/pressure", pressure);
-      json2.set("/temperature2", temperature2);
-    }
-    Firebase.updateNode(firebaseData, "/Log/" + (String)logNr,json2);
-    Firebase.setTimestamp(firebaseData, "/Log/" + String(logNr)+ "/Time");*/
-  byte screenNumber = 1;
   if (timePassed(&lastLCDupdate, LCD_UPDATE_FRQ_MS)){
     switch (screenNumber)
     {
     case 1:
+      //CO2, t, TV, RH
       lcd.clear();
       lcd.print("CO2:");
       lcd.print(arrCO2_TVOC[0]);
@@ -226,6 +232,7 @@ void updateLCD (){
       lcd.print(humidity);
       break;
     case 2:
+      //Pressure, t2
       lcd.clear();
       lcd.print("P:");
       lcd.print(pressure);
@@ -234,6 +241,7 @@ void updateLCD (){
       lcd.print(temperature2);
       break;
     case 3:
+      //Internet connection and IP
       lcd.clear();
       if (WiFi.status() == WL_CONNECTED){
         lcd.print("WiFi OK");
@@ -244,6 +252,7 @@ void updateLCD (){
       }
       break;
     default:
+      Serial.println("Invalid screen number");
       break;
     }
   }
