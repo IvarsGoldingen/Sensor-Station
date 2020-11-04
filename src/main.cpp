@@ -126,15 +126,21 @@ bool bmpReadValid = false;
 /***********Display values*****************/
 const int RS = 15, EN = 2, D4 = 0, D5 = 4, D6 = 16, D7 = 17;
 const byte MAX_SCREEN_NUMBER = 3;
+const byte PIN_BACKLIGHT = 19;
+unsigned const long LCD_UPDATE_FRQ_MS = 1000;
+unsigned const long LCD_SLEEP_DELAY_MS = 30000;
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 unsigned long lastLCDupdate = 0;
-unsigned const long LCD_UPDATE_FRQ_MS = 1000;
 byte screenNumber = 1;
+bool lcdOn = false;
 
 /***********Button values*****************/
 const byte BUTTON_PIN = 5;
+unsigned long lastButtonPress = 0;
 
-bool test = true;
+void lcdCheckSleep();
+void lcdTurnOn();
+void lcdTurnOff();
 void buttonPress(byte);
 void updateLCD();
 void measurePressureTemp();
@@ -158,8 +164,8 @@ ButtonIB btn(BUTTON_PIN, *buttonPress);
 
 void setup() {
   //Initiate LCD screen
+  lcdTurnOn();
   lcd.print("Init WiFi");
-  lcd.begin(16 ,2);
   Serial.begin(115200);
   EEPROM.begin(10);
   connectWifi();
@@ -182,6 +188,7 @@ void setup() {
                   Adafruit_BMP280::FILTER_X16,      /* Filtering. */
                   Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
   bmp_temp->printSensorDetails();
+  pinMode(PIN_BACKLIGHT, OUTPUT);
 }
 
 void loop() {
@@ -194,20 +201,51 @@ void loop() {
   measurePressureTemp();
   logFb();
   updateLCD();
+  lcdCheckSleep();
   btn.loop();
+}
+
+//Sleep LCD if the button has not been pressed
+void lcdCheckSleep(){
+  if (lcdOn){
+    if (timePassed(&lastButtonPress, LCD_SLEEP_DELAY_MS)){
+      lcdTurnOff();
+    }
+  }
+}
+
+void lcdTurnOn(){
+  lcd.begin(16 ,2);
+  lcd.display();
+  digitalWrite(PIN_BACKLIGHT, HIGH);
+  lcdOn = true;
+}
+
+void lcdTurnOff(){
+  lcd.noDisplay();
+  digitalWrite(PIN_BACKLIGHT, LOW);
+  lcdOn = false;
 }
 
 void buttonPress(byte pressType){
   debugPrint("BTN ");
+  //To know when to sleep the display
+  lastButtonPress = millis();
   if (pressType == btn.SHORT_PRESS){
     debugPrint("SHORT");
-    screenNumber++;
-    if (screenNumber > MAX_SCREEN_NUMBER){
+    if (lcdOn){
+      screenNumber++;
+      if (screenNumber > MAX_SCREEN_NUMBER){
+        screenNumber = 1;
+      }
+    } else {
+      lcdTurnOn();
       screenNumber = 1;
     }
     updateLCD();
   } else if (pressType == btn.LONG_PRESS) {
     debugPrint("LONG");
+    lcdTurnOff();
   }
 }
 
@@ -312,17 +350,6 @@ void initCO2baseValues(){
     setbaseValues = true;
   } else {
     debugPrintln("Skipping initial values");
-    /*
-    //use hard coded base values
-    CO2Base = DEFAULT_CO2_BASE;
-    TVOCBase = DEFAULT_TVOC_BASE;
-    debugPrintln("No base value stored in EEPROM");
-    debugPrint("CO2 Base set:");
-    debugPrintln((String)DEFAULT_CO2_BASE);
-    debugPrint("TVOC Base set:");
-    debugPrintln((String)DEFAULT_TVOC_BASE);
-    setbaseValues = true;
-    */
   }
   if (setbaseValues){
     if (CO2s.setBaseLine(CO2Base, TVOCBase)){
@@ -358,7 +385,6 @@ void storeBaseValues(){
       EEPROM.commit();
       debugPrintln("Base values saved");
     }
-    
   }
 }
 
@@ -447,6 +473,8 @@ uint32_t getAbsoluteHumidity(double temperature, double humidity) {
     const uint32_t absoluteHumidityScaled = static_cast<uint32_t>(1000.0f * absoluteHumidity); // [mg/m^3]
     return absoluteHumidityScaled;
 }
+
+//Returns rtue if time has passed since the previous time the event happened
 bool timePassed(unsigned long* prevTime, int intervalMs){
   unsigned long currentTime = millis();
   unsigned long timePassed = currentTime - *prevTime;
@@ -508,6 +536,7 @@ void setupFireBase(){
 
 //sava data with timestamps in FB
 void logFb() {
+  logNr = esp_random();
   if (timePassed(&lastFbLog, LOG_FB_INTERVAL_MS)){
     if (tempHumValid){
       json2.set("/temperature", temperature);
@@ -526,7 +555,7 @@ void logFb() {
     }
     Firebase.updateNode(firebaseData, "/Log/" + (String)logNr,json2);
     Firebase.setTimestamp(firebaseData, "/Log/" + String(logNr)+ "/Time");
-    logNr++;
+    //logNr++;
   }
 }
 
@@ -548,7 +577,8 @@ void updateFbRealTimeData(){
       json.set("/temperature2", temperature2);
       json.set("/pressure", pressure);
     }
-    Firebase.updateNode(firebaseData,"/SensorStation",json);    
+    Firebase.updateNode(firebaseData,"/SensorStation",json);
+    Firebase.setTimestamp(firebaseData, "/SensorStation/LastUpdate");    
   }
 }
 
