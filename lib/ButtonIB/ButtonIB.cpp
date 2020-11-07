@@ -2,6 +2,9 @@
 #include "Arduino.h"
 #include "ButtonIB.h"
 
+const byte ButtonIB::SHORT_PRESS = 1;
+const byte ButtonIB::LONG_PRESS = 2;
+
 //Constructor 1
 ButtonIB::ButtonIB(byte pin, void(*cbPressed)(byte)){
   btnPressedCb = cbPressed;
@@ -33,7 +36,8 @@ void ButtonIB::checkButtonTrigger(){
       } else if (timePassed >= SHORT_PRESS_TIME){
         btnPressedCb(SHORT_PRESS);
       }
+    } else {
+      btnWasPressed = false;
     }
-    btnWasPressed = false;
   }
 }

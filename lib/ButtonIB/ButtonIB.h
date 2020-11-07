@@ -11,7 +11,7 @@
 #include "Arduino.h"
 //Minimum lenght of button presses to be registered
 #define SHORT_PRESS_TIME 40
-#define LONG_PRESS_TIME 600
+#define LONG_PRESS_TIME 1000
 
 class ButtonIB{
   private:
@@ -26,13 +26,13 @@ class ButtonIB{
      * Function called in each loop to check if the button has been pressed
      * Returns true when the button has been let go of
      */
-     void checkButtonTrigger();
-     //A pointer to a function in the main scetch. Triggered when button is pressed
+    void checkButtonTrigger();
+    //A pointer to a function in the main scetch. Triggered when button is pressed
     void (*btnPressedCb)(byte) = 0;
   public:
     //Bytes that will be sent to the main scketch to identify if the press was long or short
-    const static byte SHORT_PRESS = 1;
-    const static byte LONG_PRESS = 2;
+    const static byte SHORT_PRESS;
+    const static byte LONG_PRESS;
     /*
     *A constructor with onoly single press callback
     *pin = the input pin which is connected to the button
@@ -42,7 +42,7 @@ class ButtonIB{
     /*
      * Loop function of the class
     */ 
-    void loop();
+    void loop();    
 };
 
 #endif

@@ -7,9 +7,8 @@
 #include <EEPROM.h>
 #include <Adafruit_BMP280.h>
 #include <LiquidCrystal.h>
-#include <ButtonIB.h>
 //debug serial print 0 = no 1 yes
-#define DEBUG 1
+#define DEBUG 0
 
 /***********EEPROM defines*****************/
 //EEPROM size
@@ -66,7 +65,7 @@ struct tm timeinfo;
 /***********wifi and Firebase values*****************/
 const char* ssid = "HUAWEI-B315-3EDC";
 const char* password =  "A3E10YT5MA2";
-const unsigned long LOG_FB_INTERVAL_S = 300;
+const unsigned long LOG_FB_INTERVAL_S = 600;
 const unsigned long LOG_FB_INTERVAL_MS = LOG_FB_INTERVAL_S * 1000;
 FirebaseData firebaseData;
 FirebaseJson json;
@@ -136,8 +135,22 @@ bool lcdOn = false;
 
 /***********Button values*****************/
 const byte BUTTON_PIN = 5;
+//Delay for button to be deactivated. Used for debounce on button realease
+const unsigned long BTN_DEACTIVATION_TIME_MS = 100;
+const unsigned long SHORT_PRESS_TIME = 40;
+const unsigned long LONG_PRESS_TIME = 1400;
+const byte SHORT_PRESS = 1;
+const byte LONG_PRESS = 2;
 unsigned long lastButtonPress = 0;
+unsigned long btnTimeOfLastDeactivation = 0;
+bool btnDeactivated = false;
+volatile bool btnWasPressed = false;
+volatile unsigned long timeOfPress = 0;
 
+
+void setupInterruptBtn();
+void checkBtn();
+void IRAM_ATTR buttonISR();
 void lcdCheckSleep();
 void lcdTurnOn();
 void lcdTurnOff();
@@ -160,7 +173,9 @@ void readSerial();
 uint32_t getAbsoluteHumidity(double temperature, double humidity);
 bool timePassed(unsigned long* prevTime, int intervalMs);
 
-ButtonIB btn(BUTTON_PIN, *buttonPress);
+//Does not work well since a lot is going on in paralell
+//changed to work from interrupt
+//ButtonIB btn(BUTTON_PIN, *buttonPress);
 
 void setup() {
   //Initiate LCD screen
@@ -189,6 +204,14 @@ void setup() {
                   Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
   bmp_temp->printSensorDetails();
   pinMode(PIN_BACKLIGHT, OUTPUT);
+  setupInterruptBtn();
+}
+
+
+void setupInterruptBtn(){
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  //ISR for button
+  attachInterrupt(BUTTON_PIN, buttonISR, RISING);
 }
 
 void loop() {
@@ -202,7 +225,67 @@ void loop() {
   logFb();
   updateLCD();
   lcdCheckSleep();
-  btn.loop();
+  checkBtn();
+}
+
+
+void checkBtn(){
+  if (btnWasPressed){
+    if (digitalRead(BUTTON_PIN)){
+      //button no longer pressed
+      unsigned long timePassed = millis() - timeOfPress;
+      if (timePassed >= LONG_PRESS_TIME){
+        buttonPress(LONG_PRESS);
+      } else if (timePassed >= SHORT_PRESS_TIME){
+        buttonPress(SHORT_PRESS);
+      } 
+    }
+  }
+
+  //Button release debounce
+  if (btnDeactivated){
+    if (timePassed(&btnTimeOfLastDeactivation, BTN_DEACTIVATION_TIME_MS)){
+      //Debounce time for button realeased has passed
+      btnDeactivated = false;
+      attachInterrupt(BUTTON_PIN, buttonISR, FALLING);
+    }
+  }
+  
+}
+//Interrupt that will be called from button press
+void IRAM_ATTR buttonISR(){
+  if (!btnWasPressed){
+    btnWasPressed = true;
+    //Save time for debounce and destinguishing between long and short press
+    timeOfPress = millis();
+    //Stop interrupt for debouncing when the button is realeased
+    detachInterrupt(BUTTON_PIN);
+  }
+}
+
+void buttonPress(byte pressType){
+  btnWasPressed = false;
+  btnDeactivated = true;
+  btnTimeOfLastDeactivation = millis();
+  debugPrint("BTN ");
+  //To know when to sleep the display
+  lastButtonPress = millis();
+  if (pressType == SHORT_PRESS){
+    debugPrintln("SHORT");
+    if (lcdOn){
+      screenNumber++;
+      if (screenNumber > MAX_SCREEN_NUMBER){
+        screenNumber = 1;
+      }
+    } else {
+      lcdTurnOn();
+      screenNumber = 1;
+    }
+    updateLCD();
+  } else if (pressType == LONG_PRESS) {
+    debugPrintln("LONG");
+    lcdTurnOff();
+  }
 }
 
 //Sleep LCD if the button has not been pressed
@@ -225,28 +308,6 @@ void lcdTurnOff(){
   lcd.noDisplay();
   digitalWrite(PIN_BACKLIGHT, LOW);
   lcdOn = false;
-}
-
-void buttonPress(byte pressType){
-  debugPrint("BTN ");
-  //To know when to sleep the display
-  lastButtonPress = millis();
-  if (pressType == btn.SHORT_PRESS){
-    debugPrint("SHORT");
-    if (lcdOn){
-      screenNumber++;
-      if (screenNumber > MAX_SCREEN_NUMBER){
-        screenNumber = 1;
-      }
-    } else {
-      lcdTurnOn();
-      screenNumber = 1;
-    }
-    updateLCD();
-  } else if (pressType == btn.LONG_PRESS) {
-    debugPrint("LONG");
-    lcdTurnOff();
-  }
 }
 
 //Show different readings on the screen
@@ -410,7 +471,6 @@ void measureHumTemp(){
     humidity = dht.readHumidity();
     //Read temperature as Celsius (the default)
     temperature = dht.readTemperature();
-
     // Check if any reads failed
     if (isnan(humidity) || isnan(temperature) || humidity > 100.0) {
       Serial.println(F("Failed to read from DHT sensor!"));
@@ -536,7 +596,6 @@ void setupFireBase(){
 
 //sava data with timestamps in FB
 void logFb() {
-  logNr = esp_random();
   if (timePassed(&lastFbLog, LOG_FB_INTERVAL_MS)){
     if (tempHumValid){
       json2.set("/temperature", temperature);
@@ -553,8 +612,12 @@ void logFb() {
       json2.set("/pressure", pressure);
       json2.set("/temperature2", temperature2);
     }
-    Firebase.updateNode(firebaseData, "/Log/" + (String)logNr,json2);
-    Firebase.setTimestamp(firebaseData, "/Log/" + String(logNr)+ "/Time");
+    //Push the data to a random name
+    Firebase.push(firebaseData, "/Log/",json2);
+    //get the key
+    String key = firebaseData.pushName();
+    //Set time stamp in the just made log
+    Firebase.setTimestamp(firebaseData, "/Log/" + key+ "/Time");
     //logNr++;
   }
 }
