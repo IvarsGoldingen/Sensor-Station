@@ -7,8 +7,11 @@
 #include <EEPROM.h>
 #include <Adafruit_BMP280.h>
 #include <LiquidCrystal.h>
+#include <Secrets.h>
 //debug serial print 0 = no 1 yes
 #define DEBUG 0
+
+//TODO:check wifi and if there is not auto connect
 
 /***********EEPROM defines*****************/
 //EEPROM size
@@ -20,10 +23,8 @@
 #define EEPADD_TVOC_1 4
 #define EEPADD_TVOC_2 5
 
-//FIREBASE and WIFI
-#define FIREBASE_HOST "https://esp32test-ef408.firebaseio.com/"
-#define FIREBASE_AUTH "AWfs3pD2ZeIbZ1tw8hNWGZ7VXgY8GyGrExGPXKIF"
-#define MAX_WIFI_CONNECT_TIME_S 10
+//FIREBASE
+#define MAX_WIFI_CONNECT_TIME_S 5
 #define MAX_WIFI_CONNECT_TIME_MS MAX_WIFI_CONNECT_TIME_S*1000
 #define WRITE_TO_FB_MS 1000
 
@@ -63,8 +64,6 @@ const int   DAYLIGHT_OFFSET_S = 3600;
 struct tm timeinfo;
 
 /***********wifi and Firebase values*****************/
-const char* ssid = "HUAWEI-B315-3EDC";
-const char* password =  "A3E10YT5MA2";
 const unsigned long LOG_FB_INTERVAL_S = 600;
 const unsigned long LOG_FB_INTERVAL_MS = LOG_FB_INTERVAL_S * 1000;
 FirebaseData firebaseData;
@@ -172,15 +171,16 @@ void measureHumTemp();
 void readSerial();
 uint32_t getAbsoluteHumidity(double temperature, double humidity);
 bool timePassed(unsigned long* prevTime, int intervalMs);
+void lcdWifiAnim (int step);
 
 //Does not work well since a lot is going on in paralell
 //changed to work from interrupt
 //ButtonIB btn(BUTTON_PIN, *buttonPress);
 
 void setup() {
+  pinMode(PIN_BACKLIGHT, OUTPUT);
   //Initiate LCD screen
   lcdTurnOn();
-  lcd.print("Init WiFi");
   Serial.begin(115200);
   EEPROM.begin(10);
   connectWifi();
@@ -203,7 +203,6 @@ void setup() {
                   Adafruit_BMP280::FILTER_X16,      /* Filtering. */
                   Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
   bmp_temp->printSensorDetails();
-  pinMode(PIN_BACKLIGHT, OUTPUT);
   setupInterruptBtn();
 }
 
@@ -550,20 +549,29 @@ void connectWifi(){
   unsigned long connectWifiStartTime = millis();
   unsigned long writeCharTime = connectWifiStartTime;
   bool connectTimeOut = false;
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  lcd.setCursor(0, 1);
+  //for WiFi connection animation
+  byte wifiAnimConStep = 0;
+  lcd.clear();
+  lcd.print("Init WiFi");
+  Serial.print("Connecting to WiFi");
+  Serial.println(Secrets::SSID);
+  WiFi.begin(Secrets::SSID, Secrets::PASSWORD);
   while (!connectTimeOut && !wifiConnected){
-    if ((millis() - writeCharTime) > 25){
+    if ((millis() - writeCharTime) > 500){
       //connecting indicator
       Serial.print(".");
-      lcd.print(".");
       writeCharTime = millis();
+      lcdWifiAnim(wifiAnimConStep);
+      wifiAnimConStep++;
+      if (wifiAnimConStep > 4){
+        wifiAnimConStep = 1;
+      }
     }
     if (WiFi.status() == WL_CONNECTED){
       //Connection successful
       wifiConnected = true;
+      lcd.setCursor(0, 0);
+      lcd.print("Wifi success");
       lcd.setCursor(0, 1);
       lcd.print(WiFi.localIP());
       Serial.println("");
@@ -571,7 +579,7 @@ void connectWifi(){
       Serial.println("IP address: ");
       Serial.println(WiFi.localIP());
       Serial.println("MAC address: "); 
-      Serial.println(WiFi.macAddress()); 
+      Serial.println(WiFi.macAddress());
     }
     if (millis() - connectWifiStartTime > MAX_WIFI_CONNECT_TIME_MS){
       //timed out of wifi connection
@@ -579,13 +587,40 @@ void connectWifi(){
         connectTimeOut = true;
         Serial.println("");
         Serial.println("WiFi connect time out");
+        lcd.setCursor(0, 0);
+        lcd.print("Wifi connection");
+        lcd.setCursor(0, 1);
+        lcd.print("failed");
       }
     }
+  }
+  //allow the user to see the wifi status on the LCD
+  delay(1000);
+}
+
+void lcdWifiAnim (int step){
+  lcd.setCursor(0,1);
+  switch (step)
+  {
+  case 1:
+    lcd.print(".  ");
+    break;
+  case 2:
+    lcd.print(".. ");
+    break;
+  case 3:
+    lcd.print("...");
+    break;
+  case 4:
+    lcd.print("   ");
+    break;
+  default:
+    break;
   }
 }
 
 void setupFireBase(){
-  Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
+  Firebase.begin(Secrets::FIREBASE_HOST, Secrets::FIREBASE_AUTH);
   Firebase.reconnectWiFi(true);
   //Set database read timeout to 1 minute (max 15 minutes)
   Firebase.setReadTimeout(firebaseData, 1000 * 60);
