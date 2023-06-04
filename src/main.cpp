@@ -6,9 +6,10 @@
 #include <FirebaseESP32.h>
 #include <EEPROM.h>
 #include <Adafruit_BMP280.h>
-//#include <WiFi.h>
+#include <LiquidCrystal.h>
+#include <Secrets.h>
 //debug serial print 0 = no 1 yes
-#define DEBUG 1
+#define DEBUG 0
 
 /***********EEPROM defines*****************/
 //EEPROM size
@@ -20,10 +21,8 @@
 #define EEPADD_TVOC_1 4
 #define EEPADD_TVOC_2 5
 
-//FIREBASE and WIFI
-#define FIREBASE_HOST "https://esp32test-ef408.firebaseio.com/"
-#define FIREBASE_AUTH "AWfs3pD2ZeIbZ1tw8hNWGZ7VXgY8GyGrExGPXKIF"
-#define MAX_WIFI_CONNECT_TIME_S 10
+//FIREBASE
+#define MAX_WIFI_CONNECT_TIME_S 5
 #define MAX_WIFI_CONNECT_TIME_MS MAX_WIFI_CONNECT_TIME_S*1000
 #define WRITE_TO_FB_MS 1000
 
@@ -62,10 +61,14 @@ const long  GMT_OFFSET_S = 7200;
 const int   DAYLIGHT_OFFSET_S = 3600;
 struct tm timeinfo;
 
+/***********WIFI auto reconnect*****************/
+unsigned long timeOfLastWifiCheck = 0;
+const unsigned long WIFI_AUTOCONNECT_FREQ_M = 1;
+const unsigned long WIFI_AUTOCONNECT_FREQ_S = 60 * WIFI_AUTOCONNECT_FREQ_M;
+const unsigned long WIFI_AUTOCONNECT_FREQ_MS = 1000 * WIFI_AUTOCONNECT_FREQ_S;
+
 /***********wifi and Firebase values*****************/
-const char* ssid = "HUAWEI-B315-3EDC";
-const char* password =  "A3E10YT5MA2";
-const unsigned long LOG_FB_INTERVAL_S = 300;
+const unsigned long LOG_FB_INTERVAL_S = 600;
 const unsigned long LOG_FB_INTERVAL_MS = LOG_FB_INTERVAL_S * 1000;
 FirebaseData firebaseData;
 FirebaseJson json;
@@ -122,8 +125,42 @@ double temperature2 = -100.0;
 double pressure = -100.0;
 bool bmpReadValid = false;
 
-bool test = true;
+/***********Display values*****************/
+const int RS = 15, EN = 2, D4 = 0, D5 = 4, D6 = 16, D7 = 17;
+const byte MAX_SCREEN_NUMBER = 3;
+const byte PIN_BACKLIGHT = 19;
+unsigned const long LCD_UPDATE_FRQ_MS = 1000;
+unsigned const long LCD_SLEEP_DELAY_MS = 30000;
+LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
+unsigned long lastLCDupdate = 0;
+byte screenNumber = 1;
+bool lcdOn = false;
 
+/***********Button values*****************/
+const byte BUTTON_PIN = 5;
+//Delay for button to be deactivated. Used for debounce on button realease
+const unsigned long BTN_DEACTIVATION_TIME_MS = 100;
+const unsigned long SHORT_PRESS_TIME = 40;
+const unsigned long LONG_PRESS_TIME = 1400;
+const byte SHORT_PRESS = 1;
+const byte LONG_PRESS = 2;
+unsigned long lastButtonPress = 0;
+unsigned long btnTimeOfLastDeactivation = 0;
+bool btnDeactivated = false;
+volatile bool btnWasPressed = false;
+volatile unsigned long timeOfPress = 0;
+
+
+
+void checkWifi();
+void setupInterruptBtn();
+void checkBtn();
+void IRAM_ATTR buttonISR();
+void lcdCheckSleep();
+void lcdTurnOn();
+void lcdTurnOff();
+void buttonPress(byte);
+void updateLCD();
 void measurePressureTemp();
 void logFb();
 void clearBaseValues();
@@ -138,10 +175,19 @@ void measureAirQuality();
 void setHumidityInCO2Sens();
 void measureHumTemp();
 void readSerial();
+
 uint32_t getAbsoluteHumidity(double temperature, double humidity);
 bool timePassed(unsigned long* prevTime, int intervalMs);
+void lcdWifiAnim (int step);
+
+//Does not work well since a lot is going on in paralell
+//changed to work from interrupt
+//ButtonIB btn(BUTTON_PIN, *buttonPress);
 
 void setup() {
+  pinMode(PIN_BACKLIGHT, OUTPUT);
+  //Initiate LCD screen
+  lcdTurnOn();
   Serial.begin(115200);
   EEPROM.begin(10);
   connectWifi();
@@ -164,6 +210,14 @@ void setup() {
                   Adafruit_BMP280::FILTER_X16,      /* Filtering. */
                   Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
   bmp_temp->printSensorDetails();
+  setupInterruptBtn();
+}
+
+
+void setupInterruptBtn(){
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  //ISR for button
+  attachInterrupt(BUTTON_PIN, buttonISR, RISING);
 }
 
 void loop() {
@@ -175,6 +229,149 @@ void loop() {
   readSerial();
   measurePressureTemp();
   logFb();
+  updateLCD();
+  lcdCheckSleep();
+  checkBtn();
+  checkWifi();
+}
+
+void checkWifi(){
+  if (timePassed(&timeOfLastWifiCheck, WIFI_AUTOCONNECT_FREQ_MS)){
+    if (WiFi.status() != WL_CONNECTED){
+      connectWifi();
+    }
+  }
+}
+
+void checkBtn(){
+  if (btnWasPressed){
+    if (digitalRead(BUTTON_PIN)){
+      //button no longer pressed
+      unsigned long timePassed = millis() - timeOfPress;
+      if (timePassed >= LONG_PRESS_TIME){
+        buttonPress(LONG_PRESS);
+      } else if (timePassed >= SHORT_PRESS_TIME){
+        buttonPress(SHORT_PRESS);
+      } 
+    }
+  }
+
+  //Button release debounce
+  if (btnDeactivated){
+    if (timePassed(&btnTimeOfLastDeactivation, BTN_DEACTIVATION_TIME_MS)){
+      //Debounce time for button realeased has passed
+      btnDeactivated = false;
+      attachInterrupt(BUTTON_PIN, buttonISR, FALLING);
+    }
+  }
+  
+}
+//Interrupt that will be called from button press
+void IRAM_ATTR buttonISR(){
+  if (!btnWasPressed){
+    btnWasPressed = true;
+    //Save time for debounce and destinguishing between long and short press
+    timeOfPress = millis();
+    //Stop interrupt for debouncing when the button is realeased
+    detachInterrupt(BUTTON_PIN);
+  }
+}
+
+void buttonPress(byte pressType){
+  btnWasPressed = false;
+  btnDeactivated = true;
+  btnTimeOfLastDeactivation = millis();
+  debugPrint("BTN ");
+  //To know when to sleep the display
+  lastButtonPress = millis();
+  if (pressType == SHORT_PRESS){
+    debugPrintln("SHORT");
+    if (lcdOn){
+      screenNumber++;
+      if (screenNumber > MAX_SCREEN_NUMBER){
+        screenNumber = 1;
+      }
+    } else {
+      lcdTurnOn();
+      screenNumber = 1;
+    }
+    //force the LCD to update after a button press
+    lastLCDupdate -= LCD_UPDATE_FRQ_MS;
+    updateLCD();
+  } else if (pressType == LONG_PRESS) {
+    debugPrintln("LONG");
+    lcdTurnOff();
+  }
+}
+
+//Sleep LCD if the button has not been pressed
+void lcdCheckSleep(){
+  if (lcdOn){
+    if (timePassed(&lastButtonPress, LCD_SLEEP_DELAY_MS)){
+      lcdTurnOff();
+    }
+  }
+}
+
+void lcdTurnOn(){
+  lcd.begin(16 ,2);
+  lcd.display();
+  digitalWrite(PIN_BACKLIGHT, HIGH);
+  lcdOn = true;
+}
+
+void lcdTurnOff(){
+  lcd.noDisplay();
+  digitalWrite(PIN_BACKLIGHT, LOW);
+  lcdOn = false;
+}
+
+//Show different readings on the screen
+void updateLCD (){
+  if (timePassed(&lastLCDupdate, LCD_UPDATE_FRQ_MS)){
+    switch (screenNumber)
+    {
+    case 1:
+      //CO2, t, TV, RH
+      lcd.clear();
+      lcd.print("CO2:");
+      lcd.print(arrCO2_TVOC[0]);
+      lcd.setCursor(8, 0);
+      lcd.print("t:");
+      lcd.print(temperature);
+      lcd.setCursor(0, 1);
+      lcd.print("TV:");
+      lcd.print(arrCO2_TVOC[1]);
+      lcd.setCursor(8, 1);
+      lcd.print("RH:");
+      lcd.print(humidity);
+      break;
+    case 2:
+      //Pressure, t2
+      lcd.clear();
+      lcd.print("P:");
+      lcd.print(pressure);
+      lcd.setCursor(0, 1);
+      lcd.print("T2:");
+      lcd.print(temperature2);
+      break;
+    case 3:
+      //Internet connection and IP
+      lcd.clear();
+      if (WiFi.status() == WL_CONNECTED){
+        lcd.print("WiFi OK");
+        lcd.setCursor(0, 1);
+        lcd.print(WiFi.localIP());
+      } else {
+        lcd.print("WiFi FAULT!");
+      }
+      break;
+    default:
+      Serial.println("Invalid screen number");
+      screenNumber = 1;
+      break;
+    }
+  }
 }
 
 //delete base values from flash
@@ -231,17 +428,6 @@ void initCO2baseValues(){
     setbaseValues = true;
   } else {
     debugPrintln("Skipping initial values");
-    /*
-    //use hard coded base values
-    CO2Base = DEFAULT_CO2_BASE;
-    TVOCBase = DEFAULT_TVOC_BASE;
-    debugPrintln("No base value stored in EEPROM");
-    debugPrint("CO2 Base set:");
-    debugPrintln((String)DEFAULT_CO2_BASE);
-    debugPrint("TVOC Base set:");
-    debugPrintln((String)DEFAULT_TVOC_BASE);
-    setbaseValues = true;
-    */
   }
   if (setbaseValues){
     if (CO2s.setBaseLine(CO2Base, TVOCBase)){
@@ -277,7 +463,6 @@ void storeBaseValues(){
       EEPROM.commit();
       debugPrintln("Base values saved");
     }
-    
   }
 }
 
@@ -303,14 +488,14 @@ void measureHumTemp(){
     humidity = dht.readHumidity();
     //Read temperature as Celsius (the default)
     temperature = dht.readTemperature();
-
     // Check if any reads failed
     if (isnan(humidity) || isnan(temperature) || humidity > 100.0) {
-      Serial.println(F("Failed to read from DHT sensor!"));
+      debugPrintln(F("Failed to read from DHT sensor!"));
+      //Serial.println(F("Failed to read from DHT sensor!"));
       tempHumValid = false;
     } else {
-      Serial.print("T: "); Serial.print(temperature); Serial.println(" C");
-      Serial.print("H: "); Serial.print(humidity); Serial.println(" %");
+      debugPrint("T: "); debugPrint((String)temperature); debugPrintln(" C");
+      debugPrint("H: "); debugPrint((String)humidity); debugPrintln(" %");
       tempHumValid = true;
     }
   }
@@ -322,11 +507,11 @@ void measureAirQuality(){
     bool success = CO2s.measure(arrCO2_TVOC);
     if (success){
       lastSGPReadValid = true;
-      Serial.print("TVOC "); Serial.print(arrCO2_TVOC[1]); Serial.print(" ppb\t");
-      Serial.print("eCO2 "); Serial.print(arrCO2_TVOC[0]); Serial.println(" ppm");
+      debugPrint("TVOC "); debugPrint((String)arrCO2_TVOC[1]); debugPrint(" ppb\t");
+      debugPrint("eCO2 "); debugPrint((String)arrCO2_TVOC[0]); debugPrintln(" ppm");
     } else {
       lastSGPReadValid = false;
-      Serial.println("SGP measurement failed");
+      debugPrintln("SGP measurement failed");
     }
   }
 }
@@ -339,18 +524,18 @@ void measurePressureTemp(){
     bool pressureReadSuccessfull = bmp_pressure->getEvent(&pressure_event);
     if (tempReadSuccessfull && pressureReadSuccessfull){
       bmpReadValid = true;
-      Serial.print(F("T = "));
-      Serial.print(temp_event.temperature);
-      Serial.println(" C");
+      debugPrint(F("T = "));
+      debugPrint((String)temp_event.temperature);
+      debugPrintln(" C");
 
-      Serial.print(F("P = "));
-      Serial.print(pressure_event.pressure);
-      Serial.println(" hPa");
+      debugPrint(F("P = "));
+      debugPrint((String)pressure_event.pressure);
+      debugPrintln(" hPa");
       temperature2 = temp_event.temperature;
       pressure = pressure_event.pressure;
     } else {
       bmpReadValid = false;
-      Serial.println("BMP measurement failed");
+      debugPrintln("BMP measurement failed");
     }
   }
 }
@@ -366,6 +551,8 @@ uint32_t getAbsoluteHumidity(double temperature, double humidity) {
     const uint32_t absoluteHumidityScaled = static_cast<uint32_t>(1000.0f * absoluteHumidity); // [mg/m^3]
     return absoluteHumidityScaled;
 }
+
+//Returns rtue if time has passed since the previous time the event happened
 bool timePassed(unsigned long* prevTime, int intervalMs){
   unsigned long currentTime = millis();
   unsigned long timePassed = currentTime - *prevTime;
@@ -377,26 +564,43 @@ bool timePassed(unsigned long* prevTime, int intervalMs){
 }
 
 //Connect to WiFi
+//Blocking function, nothing else will happen while connecting to Wifi
 void connectWifi(){
   unsigned long connectWifiStartTime = millis();
   unsigned long writeCharTime = connectWifiStartTime;
   bool connectTimeOut = false;
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
+  //for WiFi connection animation
+  byte wifiAnimConStep = 0;
+  lcdTurnOn();
+  lcd.clear();
+  lcd.print("Init WiFi");
+  debugPrint("Connecting to WiFi");
+  debugPrintln(Secrets::SSID);
+  WiFi.begin(Secrets::SSID, Secrets::PASSWORD);
   while (!connectTimeOut && !wifiConnected){
-    if ((millis() - writeCharTime) > 25){
+    if ((millis() - writeCharTime) > 500){
       //connecting indicator
-      Serial.print(".");
+      debugPrint(".");
       writeCharTime = millis();
+      lcdWifiAnim(wifiAnimConStep);
+      wifiAnimConStep++;
+      if (wifiAnimConStep > 4){
+        wifiAnimConStep = 1;
+      }
     }
     if (WiFi.status() == WL_CONNECTED){
       //Connection successful
       wifiConnected = true;
+      lcd.setCursor(0, 0);
+      lcd.print("Wifi success");
+      lcd.setCursor(0, 1);
+      lcd.print(WiFi.localIP());
       Serial.println("");
       Serial.println("WiFi connected");
       Serial.println("IP address: ");
-      Serial.println(WiFi.localIP()); 
+      Serial.println(WiFi.localIP());
+      Serial.println("MAC address: "); 
+      Serial.println(WiFi.macAddress());
     }
     if (millis() - connectWifiStartTime > MAX_WIFI_CONNECT_TIME_MS){
       //timed out of wifi connection
@@ -404,13 +608,40 @@ void connectWifi(){
         connectTimeOut = true;
         Serial.println("");
         Serial.println("WiFi connect time out");
+        lcd.setCursor(0, 0);
+        lcd.print("Wifi connection");
+        lcd.setCursor(0, 1);
+        lcd.print("failed");
       }
     }
+  }
+  //allow the user to see the wifi status on the LCD
+  delay(1000);
+}
+
+void lcdWifiAnim (int step){
+  lcd.setCursor(0,1);
+  switch (step)
+  {
+  case 1:
+    lcd.print(".  ");
+    break;
+  case 2:
+    lcd.print(".. ");
+    break;
+  case 3:
+    lcd.print("...");
+    break;
+  case 4:
+    lcd.print("   ");
+    break;
+  default:
+    break;
   }
 }
 
 void setupFireBase(){
-  Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
+  Firebase.begin(Secrets::FIREBASE_HOST, Secrets::FIREBASE_AUTH);
   Firebase.reconnectWiFi(true);
   //Set database read timeout to 1 minute (max 15 minutes)
   Firebase.setReadTimeout(firebaseData, 1000 * 60);
@@ -432,14 +663,25 @@ void logFb() {
     if (lastSGPReadValid){
       json2.set("/TVOC", arrCO2_TVOC[1]);
       json2.set("/CO2", arrCO2_TVOC[0]);
+    } else {
+      json2.set("/TVOC", -1);
+      json2.set("/CO2", -1);
     }
     if (bmpReadValid){
       json2.set("/pressure", pressure);
       json2.set("/temperature2", temperature2);
     }
-    Firebase.updateNode(firebaseData, "/Log/" + (String)logNr,json2);
-    Firebase.setTimestamp(firebaseData, "/Log/" + String(logNr)+ "/Time");
-    logNr++;
+    else {
+      json2.set("/pressure", -1);
+      json2.set("/temperature2", -1);
+    }
+    //Push the data to a random name
+    Firebase.push(firebaseData, "/Log/",json2);
+    //get the key
+    String key = firebaseData.pushName();
+    //Set time stamp in the just made log
+    Firebase.setTimestamp(firebaseData, "/Log/" + key+ "/Time");
+    //logNr++;
   }
 }
 
@@ -461,7 +703,8 @@ void updateFbRealTimeData(){
       json.set("/temperature2", temperature2);
       json.set("/pressure", pressure);
     }
-    Firebase.updateNode(firebaseData,"/SensorStation",json);    
+    Firebase.updateNode(firebaseData,"/SensorStation",json);
+    Firebase.setTimestamp(firebaseData, "/SensorStation/LastUpdate");    
   }
 }
 
